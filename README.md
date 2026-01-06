@@ -149,7 +149,7 @@ F1-Score: 0.9297 (92.97%)
 ├── main.py            # GUI application
 ├── requirements.txt   # Dependencies
 │
-├── data/              # Your dataset (not tracked)
+├── data/              # The dataset
 ├── faces_dataset/     # YOLO format (generated)
 ├── yolo_training/     # Models & metrics (generated)
 └── outputs/           # Detection results (generated)
