@@ -3,7 +3,8 @@ import cv2
 from pathlib import Path
 from csv_parser import CSVParser
 from config import Config
-
+import json
+from datetime import datetime
 
 class FaceDetector:
     def __init__(self, model_path=None):
@@ -85,7 +86,7 @@ class FaceDetector:
                 all_detections[img_name] = detections
                 print(f"  ✓ {img_name}: {len(detections)} faces detected")
             except Exception as e:
-                print(f"  ❌ {img_name}: Error - {str(e)}")
+                print(f"  ✗ {img_name}: Error - {str(e)}")
                 all_detections[img_name] = []
         
         return all_detections
@@ -132,7 +133,7 @@ class ModelEvaluator:
         
         return inter_area / union_area if union_area > 0 else 0.0
     
-    def evaluate(self, conf_threshold=None, iou_threshold=None):
+    def evaluate(self, conf_threshold=None, iou_threshold=None, max_images=None, save_results=True):
         conf_threshold = conf_threshold or Config.DEFAULT_CONF_THRESHOLD
         iou_threshold = iou_threshold or Config.DEFAULT_IOU_THRESHOLD
         
@@ -141,11 +142,25 @@ class ModelEvaluator:
         if self.ground_truth is None:
             self.load_ground_truth()
         
+        image_names = list(self.ground_truth.keys())
+        image_names.sort()
+        if max_images and max_images < len(image_names):
+            image_names = image_names[:max_images]
+            print(f"ℹ️  Evaluating first {max_images} images out of {len(self.ground_truth)}")
+        
         print(f"\n🔍 Running detection (conf={conf_threshold}, IoU={iou_threshold})...")
-        detections = self.detector.detect_batch(
-            Config.TEST_IMAGES_DIR,
-            conf_threshold=conf_threshold
-        )
+        
+        detections = {}
+        for img_name in image_names:
+            img_path = os.path.join(Config.TEST_IMAGES_DIR, img_name)
+            if os.path.exists(img_path):
+                try:
+                    det = self.detector.detect_faces(img_path, conf_threshold, save_result=True)
+                    detections[img_name] = det
+                    print(f"  ✓ {img_name}: {len(det)} faces detected")
+                except Exception as e:
+                    print(f"  ✗ {img_name}: Error - {str(e)}")
+                    detections[img_name] = []
         
         print(f"\n📊 Calculating metrics...")
         
@@ -155,7 +170,12 @@ class ModelEvaluator:
         total_gt_faces = 0
         total_det_faces = 0
         
-        for img_name in self.ground_truth:
+        per_image_results = []
+        
+        for img_name in image_names:
+            if img_name not in self.ground_truth:
+                continue
+                
             gt_boxes = self.ground_truth[img_name]['bboxes']
             det_boxes = [d['bbox'] for d in detections.get(img_name, [])]
             
@@ -165,7 +185,9 @@ class ModelEvaluator:
             matched_gt = set()
             matched_det = set()
             
-            # Match detections to ground truth
+            img_tp = 0
+            img_fp = 0
+            
             for i, det_box in enumerate(det_boxes):
                 best_iou = 0
                 best_gt_idx = -1
@@ -181,20 +203,107 @@ class ModelEvaluator:
                 
                 if best_iou >= iou_threshold:
                     true_positives += 1
+                    img_tp += 1
                     matched_gt.add(best_gt_idx)
                     matched_det.add(i)
                 else:
                     false_positives += 1
+                    img_fp += 1
             
-            # Unmatched ground truth boxes are false negatives
-            false_negatives += len(gt_boxes) - len(matched_gt)
+            img_fn = len(gt_boxes) - len(matched_gt)
+            false_negatives += img_fn
+            
+            per_image_results.append({
+                'image_name': img_name,
+                'ground_truth_faces': len(gt_boxes),
+                'detected_faces': len(det_boxes),
+                'true_positives': img_tp,
+                'false_positives': img_fp,
+                'false_negatives': img_fn
+            })
         
         precision = true_positives / (true_positives + false_positives) if (true_positives + false_positives) > 0 else 0
         recall = true_positives / (true_positives + false_negatives) if (true_positives + false_negatives) > 0 else 0
         f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
         
-        print("✅ EVALUATION RESULTS\n")
+        results = {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'config': {
+                'confidence_threshold': conf_threshold,
+                'iou_threshold': iou_threshold,
+                'max_images': max_images,
+                'images_evaluated': len(image_names)
+            },
+            'metrics': {
+                'precision': float(precision),
+                'recall': float(recall),
+                'f1_score': float(f1_score),
+                'true_positives': int(true_positives),
+                'false_positives': int(false_positives),
+                'false_negatives': int(false_negatives),
+                'total_gt_faces': int(total_gt_faces),
+                'total_det_faces': int(total_det_faces)
+            },
+            'per_image_results': per_image_results
+        }
+        
+        if save_results:
+            eval_dir = os.path.join(Config.OUTPUT_DIR, 'evaluation')
+            os.makedirs(eval_dir, exist_ok=True)
+            
+            json_path = os.path.join(eval_dir, f"evaluation_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json")
+            with open(json_path, 'w') as f:
+                json.dump(results, f, indent=2)
+            
+            report_path = os.path.join(eval_dir, f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt")
+            with open(report_path, 'w') as f:
+                f.write("=" * 60 + "\n")
+                f.write("FACE DETECTION MODEL EVALUATION REPORT\n")
+                f.write("=" * 60 + "\n\n")
+                f.write(f"Timestamp: {results['timestamp']}\n")
+                f.write(f"Images Evaluated: {len(image_names)}\n")
+                f.write(f"Confidence Threshold: {conf_threshold}\n")
+                f.write(f"IoU Threshold: {iou_threshold}\n\n")
+                
+                f.write("-" * 60 + "\n")
+                f.write("OVERALL METRICS\n")
+                f.write("-" * 60 + "\n")
+                f.write(f"Precision:         {precision:.4f} ({precision * 100:.2f}%)\n")
+                f.write(f"Recall:            {recall:.4f} ({recall * 100:.2f}%)\n")
+                f.write(f"F1-Score:          {f1_score:.4f} ({f1_score * 100:.2f}%)\n\n")
+                
+                f.write("-" * 60 + "\n")
+                f.write("DETECTION STATISTICS\n")
+                f.write("-" * 60 + "\n")
+                f.write(f"Ground Truth Faces:    {total_gt_faces}\n")
+                f.write(f"Detected Faces:        {total_det_faces}\n")
+                f.write(f"True Positives:        {true_positives}\n")
+                f.write(f"False Positives:       {false_positives}\n")
+                f.write(f"False Negatives:       {false_negatives}\n\n")
+                
+                f.write("-" * 60 + "\n")
+                f.write("PER-IMAGE RESULTS (First 20)\n")
+                f.write("-" * 60 + "\n")
+                for result in per_image_results[:20]:
+                    f.write(f"\n{result['image_name']}:\n")
+                    f.write(f"  GT Faces: {result['ground_truth_faces']}, ")
+                    f.write(f"Detected: {result['detected_faces']}, ")
+                    f.write(f"TP: {result['true_positives']}, ")
+                    f.write(f"FP: {result['false_positives']}, ")
+                    f.write(f"FN: {result['false_negatives']}\n")
+                
+                if len(per_image_results) > 20:
+                    f.write(f"\n... and {len(per_image_results) - 20} more images\n")
+            
+            print(f"\n💾 Results saved:")
+            print(f"  JSON: {json_path}")
+            print(f"  Report: {report_path}")
+        
+        print("\n" + "=" * 60)
+        print("✅ EVALUATION RESULTS")
+        print("=" * 60)
         print(f"\n📊 Detection Statistics:")
+        print(f"  Images evaluated: {len(image_names)}")
         print(f"  Total ground truth faces: {total_gt_faces}")
         print(f"  Total detected faces: {total_det_faces}")
         print(f"  True Positives: {true_positives}")
@@ -207,17 +316,9 @@ class ModelEvaluator:
         print(f"  F1-Score: {f1_score:.4f} ({f1_score * 100:.2f}%)")
         
         print(f"\n💾 Annotated images saved in: {Config.OUTPUT_DIR}/")
+        print("=" * 60 + "\n")
         
-        return {
-            'precision': precision,
-            'recall': recall,
-            'f1_score': f1_score,
-            'true_positives': true_positives,
-            'false_positives': false_positives,
-            'false_negatives': false_negatives,
-            'total_gt_faces': total_gt_faces,
-            'total_det_faces': total_det_faces
-        }
+        return results
 
 
 if __name__ == "__main__":
@@ -225,4 +326,4 @@ if __name__ == "__main__":
     detector.load_model()
     
     evaluator = ModelEvaluator(detector)
-    evaluator.evaluate()
+    evaluator.evaluate(max_images=100)

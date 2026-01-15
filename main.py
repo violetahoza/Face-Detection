@@ -479,15 +479,29 @@ class ModernFaceDetectionGUI:
             messagebox.showwarning("No Model", "Please train a model first!")
             return
         
+        max_images = simpledialog.askinteger(
+            "Evaluation Settings",
+            "How many test images to evaluate?\n(Enter 0 or leave blank for all images)",
+            initialvalue=100,
+            minvalue=0,
+            maxvalue=1000
+        )
+        
+        if max_images is None:  
+            return
+        
+        if max_images == 0:
+            max_images = None 
+        
         if not messagebox.askyesno(
             "Evaluate Model",
-            "Run full evaluation on test set?\nThis may take several minutes."
+            f"Run evaluation on {'first ' + str(max_images) if max_images else 'all'} test image(s)?\nThis may take several minutes."
         ):
             return
         
-        threading.Thread(target=self._evaluate_worker, daemon=True).start()
+        threading.Thread(target=self._evaluate_worker, args=(max_images,), daemon=True).start()
     
-    def _evaluate_worker(self):
+    def _evaluate_worker(self, max_images=None):
         try:
             self.message_queue.put(("progress_show", "Evaluating model..."))
             self.message_queue.put(("log", "\n📈 Starting evaluation...\n"))
@@ -495,20 +509,23 @@ class ModernFaceDetectionGUI:
             evaluator = ModelEvaluator(self.detector)
             results = evaluator.evaluate(
                 conf_threshold=Config.DEFAULT_CONF_THRESHOLD,
-                iou_threshold=Config.DEFAULT_IOU_THRESHOLD
+                iou_threshold=Config.DEFAULT_IOU_THRESHOLD,
+                max_images=max_images,
+                save_results=True
             )
             
             self.message_queue.put(("log", "\n✓ Evaluation complete!\n"))
             
             result_msg = (
                 f"Evaluation Results:\n\n"
-                f"Precision: {results['precision']:.4f} ({results['precision']*100:.2f}%)\n"
-                f"Recall: {results['recall']:.4f} ({results['recall']*100:.2f}%)\n"
-                f"F1-Score: {results['f1_score']:.4f} ({results['f1_score']*100:.2f}%)\n\n"
-                f"True Positives: {results['true_positives']}\n"
-                f"False Positives: {results['false_positives']}\n"
-                f"False Negatives: {results['false_negatives']}\n\n"
-                f"Results saved in: {Config.OUTPUT_DIR}/"
+                f"Images Evaluated: {results['config']['images_evaluated']}\n\n"
+                f"Precision: {results['metrics']['precision']:.4f} ({results['metrics']['precision']*100:.2f}%)\n"
+                f"Recall: {results['metrics']['recall']:.4f} ({results['metrics']['recall']*100:.2f}%)\n"
+                f"F1-Score: {results['metrics']['f1_score']:.4f} ({results['metrics']['f1_score']*100:.2f}%)\n\n"
+                f"True Positives: {results['metrics']['true_positives']}\n"
+                f"False Positives: {results['metrics']['false_positives']}\n"
+                f"False Negatives: {results['metrics']['false_negatives']}\n\n"
+                f"Results saved in: {Config.OUTPUT_DIR}/evaluation/"
             )
             
             self.message_queue.put(("msgbox", ("Evaluation Complete", result_msg, "info")))
